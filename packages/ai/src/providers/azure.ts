@@ -1,7 +1,9 @@
+import { Effect, Schema } from "effect"
 import { Headers } from "effect/unstable/http"
 import { Auth } from "../route/auth.js"
 import { type AtLeastOne, type ProviderAuthOption } from "../route/auth-options.js"
-import type { Route, RouteDefaultsInput, CompactionOperations } from "../route/client.js"
+import { Route, type RouteDefaultsInput, type CompactionOperations } from "../route/client.js"
+import { Protocol } from "../route/protocol.js"
 import type { ProviderPackage } from "../provider-package.js"
 import { ProviderConfigurationError, ProviderID, type ModelID } from "../schema/index.js"
 import * as OpenAIChat from "../protocols/openai-chat.js"
@@ -38,10 +40,47 @@ export type Settings = ProviderPackage.Settings &
 
 const resourceBaseURL = (resourceName: string) => `https://${resourceName.trim()}.openai.azure.com/openai`
 
-const responsesRoute = OpenAIResponses.route.with({
+const isFoundryProject = (baseURL: string | undefined) => {
+  if (baseURL === undefined) return false
+  const url = new URL(baseURL)
+  return url.hostname.endsWith(".services.ai.azure.com") && url.pathname.startsWith("/api/projects/")
+}
+
+// The shared builder validates the complete body before Azure adds the standard
+// message discriminator. Keep that field through the route's final JSON encoding.
+const responsesBody = Schema.declare<OpenAIResponses.OpenAIResponsesBody>(
+  Schema.is(OpenAIResponses.protocol.body.schema),
+)
+const decodeResponsesBody = ProviderShared.validateWith(Schema.decodeUnknownEffect(responsesBody))
+
+const responsesProtocol: typeof OpenAIResponses.protocol = Protocol.make({
+  ...OpenAIResponses.protocol,
+  body: {
+    schema: responsesBody,
+    from: Effect.fn("Azure.responsesBody")(function* (request) {
+      const body = yield* OpenAIResponses.protocol.body.from(request)
+      if (!isFoundryProject(request.model.route.endpoint.baseURL)) return body
+      return yield* decodeResponsesBody({
+        ...body,
+        input: body.input.map((item) => {
+          const role = "role" in item ? item.role : undefined
+          if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") return item
+          return { ...item, type: "message" }
+        }),
+      })
+    }),
+  },
+})
+
+const responsesRoute = Route.make({
   compact: { endpoint: OpenAIResponses.route.compact.endpoint },
+  defaults: OpenAIResponses.route.defaults,
+  endpoint: OpenAIResponses.route.endpoint,
+  headers: OpenAIResponses.route.headers,
   id: "azure-openai-responses",
   provider: id,
+  providerMetadataKey: id,
+  protocol: responsesProtocol,
   auth: routeAuth,
   transport: OpenAIResponses.channelTransport({
     id: "azure-openai-responses",
