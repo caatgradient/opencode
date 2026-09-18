@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "base": "fork/dev",
+  "method": "2026-09-18.5",
+  "checks": [
+    [
+      "npm",
+      "test"
+    ]
+  ]
+}
